@@ -30,6 +30,7 @@ const TARGET_BPS = 9_973n; // share held while the machine is in
 const REFERENCE: 'first' | 'high' = 'high';
 const DIP = 0.002;
 const REBOUND = 0;
+const ENTER_BY_BAR: number | null = 30; // with no dip by this bar, the first entry is made anyway
 const ENTRY_CUTOFF_BAR = WINDOW_BARS; // no new entry after this bar index
 const TAKE_PROFIT: number | null = 0.008;
 // The target shrinks in a straight line from TAKE_PROFIT at bar TAKE_PROFIT_DECAY_FROM to
@@ -44,7 +45,7 @@ const REENTRY_DIP: number | null = null; // DIP for the entries after the first 
 const REENTRY_REFERENCE: 'first' | 'high' | 'exit' = 'high';
 // Orders are cut into slices over consecutive bars: the pool's impact starts again from its open
 // depth on every bar, so N slices pay about 1/N of the impact of one order.
-const ORDER_SLICES = 6;
+const ORDER_SLICES = 8;
 const END_SLICES = 6; // the position is sold over the last END_SLICES decision bars
 const MAX_SLIPPAGE_BPS = 400;
 const FIRST_FILL_SLIPPAGE_BPS = 10_000;
@@ -65,6 +66,7 @@ let mode: 'wait' | 'in' | 'done' = 'wait';
 let reference = 0; // price the dip is measured from
 let low = 0; // running low once armed
 let armed = false;
+let entries = 0; // entries made so far
 let entry = 0; // close at the entry decision
 let peak = 0; // highest close since the entry
 let reentriesLeft = REENTRIES;
@@ -93,7 +95,9 @@ function advance(index: number, close: number): void {
   if (mode === 'wait') {
     if (REFERENCE === 'high' && close > reference) reference = close;
     if (index > ENTRY_CUTOFF_BAR) return;
-    if (!armed && close <= reference * (1 - dip)) {
+    // The pool can grind up for hours without a pullback: the first entry is not kept waiting past ENTER_BY_BAR.
+    const overdue = entries === 0 && ENTER_BY_BAR !== null && index >= ENTER_BY_BAR;
+    if (!armed && (close <= reference * (1 - dip) || overdue)) {
       armed = true;
       low = close;
     }
@@ -101,6 +105,7 @@ function advance(index: number, close: number): void {
       if (close < low) low = close;
       if (close >= low * (1 + REBOUND)) {
         mode = 'in';
+        entries += 1;
         entry = close;
         peak = close;
         targetBps = TARGET_BPS;
