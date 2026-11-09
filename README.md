@@ -12,20 +12,35 @@ The harness sends one `hello`, then one `batch` per minute (the bar that just cl
 the previous batch's orders, the account), then `done`. The bot answers every batch with one reply
 carrying its orders, which fill at the next bar's open.
 
+The strategy is one round trip, sized at nearly all of the equity:
+
+1. A 1.73 USDC probe on the first batch, so one order of its own fills on every path.
+2. Entry on the first pullback of 0.2% from the running high of the closes, or by bar 30 if the
+   pool has not pulled back by then.
+3. Exit at a take-profit target over the entry close: 0.8% for the first half of the window, then
+   shrinking in a straight line to 0.2% at the end. With no target hit, the position is held.
+4. Whatever is still held is sold over the last six decision bars, ahead of the replay's forced
+   sale at the last close.
+
+Execution:
+
 - Every decision is taken from the account in the batch (cash, position), so an order the market
   refuses (`no_bar`, `max_slippage`) is sized again on the next batch.
-- Orders are cut into slices over consecutive bars: the pool's price impact starts again from its
-  open depth every bar, so N slices pay about 1/N of the impact of one order.
-- The position is sold in slices over the last bars of the window, before the replay's forced sale
-  at the last close.
+- Orders are cut into eight slices over consecutive bars: the pool's price impact starts again
+  from its open depth every bar, so N slices pay about 1/N of the impact of one order.
 - No clock, no randomness, no network, no dependencies: two runs give the same bytes.
+
+Why this shape: the ranking pays by place on one unseen 24 hour window, and one-minute bars carry
+no edge after costs, so the setting was chosen by how often it would finish first against a
+simulated field of other entries (full longs, dip buyers that hold, dip buyers that sell the
+bounce, ladders, probes) over 150 days of 24 hour windows, not by its mean PnL.
 
 ## How it is scored
 
-Net PnL in USDC after every fee (4 bps fee, 4 bps pool fee, 2 bps slippage, price impact) on the
-24 hours of one-minute bars that start one hour after the deadline. An entry races only if it made
-money on the published dev window, must make at least one trade, and must keep its maximum drawdown
-at 25% or less.
+Net PnL in USDC after every fee (4 bps fee, 2 bps slippage, price impact against the pool's depth)
+on the 24 hours of one-minute bars that start one hour after the deadline. An entry races only if
+it made money on the published dev window, must make at least one trade, and must keep its maximum
+drawdown at 25% or less.
 
 ## Run it locally
 
