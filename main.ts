@@ -5,21 +5,43 @@
 // Orders fill at the next bar's open, so everything here is decided from the latest close and from
 // the account the batch reports (cash and position), never from what we remember having sent:
 // a rejected order (no_bar, max_slippage) is simply sized again on the next batch.
+//
+// Strategy: a small state machine over one-minute closes.
+//   wait  the reference is the first close ('first') or the running high ('high'). Once the close is
+//         DIP below it the machine is armed and follows the running low; it enters when the close is
+//         REBOUND above that low (0 = at once).
+//   in    holds TARGET_BPS of equity. It leaves on a take profit over the entry close, on a trailing
+//         stop from the peak (once the gain passed TRAIL_ARM), or on a stop loss; otherwise it holds.
+//   done  nothing more, unless re-entries are left: then back to wait with a new reference.
+// A probe order on the first batch guarantees one fill on every path, and whatever is held near the
+// end is sold in slices before the replay's forced sale.
 
 import { createInterface } from 'node:readline';
 
 const SYMBOL = 'CBBTC';
 const MINUTE_MS = 60_000;
 const WINDOW_BARS = 1_440; // both windows are 24 h of one-minute bars
+const USDC = 1_000_000n;
 
-// Entry: the cash to deploy is bought in ENTRY_SLICES pieces, one per bar, because the pool's impact
-// starts again from its open depth on every bar (N slices pay about 1/N of the impact).
-const ENTRY_SLICES = 7;
-// Exit: the position is sold over the last EXIT_SLICES decision bars, so the forced sale at the last
-// close (full impact, no limit) has nothing left to sell.
-const EXIT_SLICES = 7;
-// Share of equity to hold, in bps. Odd on purpose: no other entry sends these sizes.
-const TARGET_BPS = 9_713n;
+// ---- settings (shares in bps of equity, moves as fractions of price) ----
+const PROBE_UNITS = 1_730_000n; // the first order: 1.73 USDC, a size nobody else sends
+const BASE_BPS = 0n; // share held from the first bar, whatever the machine does
+const TARGET_BPS = 9_973n; // share held while the machine is in
+const REFERENCE: 'first' | 'high' = 'high';
+const DIP = 0.002;
+const REBOUND = 0;
+const ENTRY_CUTOFF_BAR = WINDOW_BARS; // no new entry after this bar index
+const TAKE_PROFIT: number | null = 0.008;
+const TRAIL: number | null = null;
+const TRAIL_ARM = 0;
+const STOP_LOSS: number | null = null;
+const REENTRIES = 0;
+const REENTRY_DIP: number | null = null; // DIP for the entries after the first (null = the same)
+const REENTRY_REFERENCE: 'first' | 'high' | 'exit' = 'high';
+// Orders are cut into slices over consecutive bars: the pool's impact starts again from its open
+// depth on every bar, so N slices pay about 1/N of the impact of one order.
+const ORDER_SLICES = 3;
+const END_SLICES = 6; // the position is sold over the last END_SLICES decision bars
 const MAX_SLIPPAGE_BPS = 400;
 const FIRST_FILL_SLIPPAGE_BPS = 10_000;
 
@@ -30,9 +52,22 @@ interface Batch { type: 'batch'; seq: number; t: number; bars: Bar[]; fills: unk
 interface Order { side: 'buy' | 'sell'; client_id: string; symbol: string; notional_quote_units?: string; qty?: string; max_slippage_bps: number }
 
 let firstCloseMs = -1;
-let minNotional = 1_000_000n;
-let lastClose = 0n; // latest close seen, at the symbol's price scale
+let minNotional = USDC;
+let startCash = 1_000n * USDC;
 let orderCount = 0;
+
+// machine state
+let mode: 'wait' | 'in' | 'done' = 'wait';
+let reference = 0; // price the dip is measured from
+let low = 0; // running low once armed
+let armed = false;
+let entry = 0; // close at the entry decision
+let peak = 0; // highest close since the entry
+let reentriesLeft = REENTRIES;
+let dip = DIP;
+let targetBps = BASE_BPS;
+let slicesLeft = ORDER_SLICES;
+let seenBar = false;
 
 function clientId(tag: string, seq: number): string {
   orderCount += 1;
@@ -42,44 +77,106 @@ function clientId(tag: string, seq: number): string {
 function onHello(hello: any): void {
   firstCloseMs = hello.first_close_ms;
   minNotional = BigInt(hello.fees.min_notional_quote_units);
+  startCash = BigInt(hello.capital.quote_units);
+}
+
+// One step of the machine on a new close; sets targetBps.
+function advance(index: number, close: number): void {
+  if (!seenBar) {
+    seenBar = true;
+    reference = close;
+  }
+  if (mode === 'wait') {
+    if (REFERENCE === 'high' && close > reference) reference = close;
+    if (index > ENTRY_CUTOFF_BAR) return;
+    if (!armed && close <= reference * (1 - dip)) {
+      armed = true;
+      low = close;
+    }
+    if (armed) {
+      if (close < low) low = close;
+      if (close >= low * (1 + REBOUND)) {
+        mode = 'in';
+        entry = close;
+        peak = close;
+        targetBps = TARGET_BPS;
+        slicesLeft = ORDER_SLICES;
+        armed = false;
+      }
+    }
+    return;
+  }
+  if (mode === 'in') {
+    if (close > peak) peak = close;
+    let leave = false;
+    if (TAKE_PROFIT !== null && close >= entry * (1 + TAKE_PROFIT)) leave = true;
+    if (TRAIL !== null && peak >= entry * (1 + TRAIL_ARM) && close <= peak * (1 - TRAIL)) leave = true;
+    if (STOP_LOSS !== null && close <= entry * (1 - STOP_LOSS)) leave = true;
+    if (!leave) return;
+    targetBps = BASE_BPS;
+    slicesLeft = ORDER_SLICES;
+    if (reentriesLeft > 0) {
+      reentriesLeft -= 1;
+      mode = 'wait';
+      if (REENTRY_DIP !== null) dip = REENTRY_DIP;
+      if (REENTRY_REFERENCE !== 'first') reference = close;
+    } else {
+      mode = 'done';
+    }
+  }
 }
 
 function onBatch(batch: Batch): Order[] {
   if (firstCloseMs < 0) firstCloseMs = batch.t;
+  const index = Math.round((batch.t - firstCloseMs) / MINUTE_MS); // 0 on the first batch
   const bar = batch.bars.find((b) => b.symbol === SYMBOL);
-  if (bar !== undefined) lastClose = BigInt(bar.c);
-  if (lastClose === 0n) return []; // no bar yet: nothing to price an order against
+  if (bar !== undefined) advance(index, Number(bar.c));
+  if (!seenBar) return []; // no bar yet: nothing to price an order against
 
   const cash = BigInt(batch.account.cash_quote_units);
   const equity = BigInt(batch.account.equity_quote_units);
   const held = batch.account.positions.find((p) => p.symbol === SYMBOL);
   const qty = held === undefined ? 0n : BigInt(held.qty);
-  const positionValue = equity - cash;
+  const position = equity - cash; // the position at the latest close
 
-  const index = Math.round((batch.t - firstCloseMs) / MINUTE_MS); // 0 on the first batch
   const decisionsLeft = WINDOW_BARS - 1 - index; // batches after this one; 0 on the last batch
   if (decisionsLeft <= 0) return []; // an order decided on the last batch is rejected (after_end)
 
-  // Exit phase: sell what is held in equal slices, everything on the last decision bar.
-  if (decisionsLeft <= EXIT_SLICES) {
+  // End of the window: sell what is held in equal slices, everything on the last decision bar.
+  if (decisionsLeft <= END_SLICES) {
     if (qty === 0n) return [];
     const slice = decisionsLeft === 1 ? qty : qty / BigInt(decisionsLeft);
     if (slice === 0n) return [];
-    return [{ side: 'sell', client_id: clientId('x', batch.seq), symbol: SYMBOL, qty: slice.toString(), max_slippage_bps: MAX_SLIPPAGE_BPS }];
+    return [{ side: 'sell', client_id: clientId('z', batch.seq), symbol: SYMBOL, qty: slice.toString(), max_slippage_bps: MAX_SLIPPAGE_BPS }];
   }
 
-  // Entry phase: buy toward the target share of equity, one slice per bar.
-  const target = (equity * TARGET_BPS) / 10_000n;
-  const missing = target - positionValue;
-  if (missing < minNotional) return [];
-  const slicesLeft = BigInt(Math.max(1, ENTRY_SLICES - index));
-  let spend = missing / slicesLeft;
-  if (spend < minNotional) spend = minNotional;
-  if (spend > cash) spend = cash;
-  if (spend < minNotional) return [];
-  // The guardrail needs one filled order of our own: until something is held, the limit is wide open.
-  const limit = qty === 0n ? FIRST_FILL_SLIPPAGE_BPS : MAX_SLIPPAGE_BPS;
-  return [{ side: 'buy', client_id: clientId('e', batch.seq), symbol: SYMBOL, notional_quote_units: spend.toString(), max_slippage_bps: limit }];
+  const want = (equity * targetBps) / 10_000n;
+  const threshold = (3n * USDC) / 2n;
+  const slices = BigInt(Math.max(1, slicesLeft));
+  // Until our own first fill the limit is wide open: the guardrail needs one filled order.
+  const untouched = qty === 0n && cash === startCash;
+  const buyLimit = untouched ? FIRST_FILL_SLIPPAGE_BPS : MAX_SLIPPAGE_BPS;
+
+  if (want - position >= threshold && cash >= minNotional) {
+    let spend = (want - position) / slices;
+    if (slicesLeft > 1) slicesLeft -= 1;
+    if (spend < minNotional) spend = minNotional;
+    if (spend > cash) spend = cash;
+    return [{ side: 'buy', client_id: clientId('b', batch.seq), symbol: SYMBOL, notional_quote_units: spend.toString(), max_slippage_bps: buyLimit }];
+  }
+  // Selling needs a wider gap than buying, so the probe is never sold back on its own.
+  if (position - want >= 3n * USDC && qty > 0n) {
+    let amount = targetBps === 0n && slicesLeft <= 1 ? qty : (qty * (position - want)) / (position * slices);
+    if (slicesLeft > 1) slicesLeft -= 1;
+    if (amount > qty) amount = qty;
+    if (amount === 0n) return [];
+    return [{ side: 'sell', client_id: clientId('s', batch.seq), symbol: SYMBOL, qty: amount.toString(), max_slippage_bps: MAX_SLIPPAGE_BPS }];
+  }
+  // The probe: sent again on every batch until one order of ours has filled.
+  if (untouched && PROBE_UNITS >= minNotional) {
+    return [{ side: 'buy', client_id: clientId('p', batch.seq), symbol: SYMBOL, notional_quote_units: PROBE_UNITS.toString(), max_slippage_bps: FIRST_FILL_SLIPPAGE_BPS }];
+  }
+  return [];
 }
 
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
