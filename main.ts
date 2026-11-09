@@ -32,6 +32,10 @@ const DIP = 0.002;
 const REBOUND = 0;
 const ENTRY_CUTOFF_BAR = WINDOW_BARS; // no new entry after this bar index
 const TAKE_PROFIT: number | null = 0.008;
+// The target shrinks in a straight line from TAKE_PROFIT at bar TAKE_PROFIT_DECAY_FROM to
+// TAKE_PROFIT_END at the end of the window: with little time left, a smaller gain is the one to take.
+const TAKE_PROFIT_END: number | null = 0.002;
+const TAKE_PROFIT_DECAY_FROM = 720;
 const TRAIL: number | null = null;
 const TRAIL_ARM = 0;
 const STOP_LOSS: number | null = null;
@@ -40,7 +44,7 @@ const REENTRY_DIP: number | null = null; // DIP for the entries after the first 
 const REENTRY_REFERENCE: 'first' | 'high' | 'exit' = 'high';
 // Orders are cut into slices over consecutive bars: the pool's impact starts again from its open
 // depth on every bar, so N slices pay about 1/N of the impact of one order.
-const ORDER_SLICES = 3;
+const ORDER_SLICES = 6;
 const END_SLICES = 6; // the position is sold over the last END_SLICES decision bars
 const MAX_SLIPPAGE_BPS = 400;
 const FIRST_FILL_SLIPPAGE_BPS = 10_000;
@@ -109,7 +113,14 @@ function advance(index: number, close: number): void {
   if (mode === 'in') {
     if (close > peak) peak = close;
     let leave = false;
-    if (TAKE_PROFIT !== null && close >= entry * (1 + TAKE_PROFIT)) leave = true;
+    if (TAKE_PROFIT !== null) {
+      let target = TAKE_PROFIT;
+      if (TAKE_PROFIT_END !== null) {
+        const progress = Math.max(0, (index - TAKE_PROFIT_DECAY_FROM) / (WINDOW_BARS - TAKE_PROFIT_DECAY_FROM));
+        target = TAKE_PROFIT + (TAKE_PROFIT_END - TAKE_PROFIT) * progress;
+      }
+      if (close >= entry * (1 + target)) leave = true;
+    }
     if (TRAIL !== null && peak >= entry * (1 + TRAIL_ARM) && close <= peak * (1 - TRAIL)) leave = true;
     if (STOP_LOSS !== null && close <= entry * (1 - STOP_LOSS)) leave = true;
     if (!leave) return;
