@@ -21,6 +21,7 @@ const EXIT_SLICES = 7;
 // Share of equity to hold, in bps. Odd on purpose: no other entry sends these sizes.
 const TARGET_BPS = 9_713n;
 const MAX_SLIPPAGE_BPS = 400;
+const FIRST_FILL_SLIPPAGE_BPS = 10_000;
 
 interface Bar { symbol: string; t: number; o: string; h: string; l: string; c: string; o_depth: string[]; c_depth: string[] }
 interface Position { symbol: string; qty: string; cost_quote_units: string }
@@ -76,7 +77,9 @@ function onBatch(batch: Batch): Order[] {
   if (spend < minNotional) spend = minNotional;
   if (spend > cash) spend = cash;
   if (spend < minNotional) return [];
-  return [{ side: 'buy', client_id: clientId('e', batch.seq), symbol: SYMBOL, notional_quote_units: spend.toString(), max_slippage_bps: MAX_SLIPPAGE_BPS }];
+  // The guardrail needs one filled order of our own: until something is held, the limit is wide open.
+  const limit = qty === 0n ? FIRST_FILL_SLIPPAGE_BPS : MAX_SLIPPAGE_BPS;
+  return [{ side: 'buy', client_id: clientId('e', batch.seq), symbol: SYMBOL, notional_quote_units: spend.toString(), max_slippage_bps: limit }];
 }
 
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
