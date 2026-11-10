@@ -32,10 +32,10 @@ const DIP = 0.002;
 const REBOUND = 0;
 const ENTER_BY_BAR: number | null = 30; // with no dip by this bar, the first entry is made anyway
 const ENTRY_CUTOFF_BAR = WINDOW_BARS; // no new entry after this bar index
-const TAKE_PROFIT: number | null = 0.008;
+const TAKE_PROFIT: number | null = 0.019;
 // The target shrinks in a straight line from TAKE_PROFIT at bar TAKE_PROFIT_DECAY_FROM to
 // TAKE_PROFIT_END at the end of the window: with little time left, a smaller gain is the one to take.
-const TAKE_PROFIT_END: number | null = 0.002;
+const TAKE_PROFIT_END: number | null = null;
 const TAKE_PROFIT_DECAY_FROM = 720;
 const TRAIL: number | null = null;
 const TRAIL_ARM = 0;
