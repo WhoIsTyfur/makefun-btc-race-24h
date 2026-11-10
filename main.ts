@@ -39,7 +39,8 @@ const TAKE_PROFIT_END: number | null = 0.002;
 const TAKE_PROFIT_DECAY_FROM = 720;
 const TRAIL: number | null = null;
 const TRAIL_ARM = 0;
-const STOP_LOSS: number | null = null;
+// A stop far outside any ordinary day: it only exists to keep a crash inside the 25% drawdown guardrail.
+const STOP_LOSS: number | null = 0.16;
 const REENTRIES = 0;
 const REENTRY_DIP: number | null = null; // DIP for the entries after the first (null = the same)
 const REENTRY_REFERENCE: 'first' | 'high' | 'exit' = 'high';
@@ -49,11 +50,13 @@ const ORDER_SLICES = 8;
 const END_SLICES = 6; // the position is sold over the last END_SLICES decision bars
 const MAX_SLIPPAGE_BPS = 400;
 const FIRST_FILL_SLIPPAGE_BPS = 10_000;
+const SLICE_ORDER = /^tyf-[bs]-/; // client ids of the entry and exit slices (not the probe, not the end sale)
 
 interface Bar { symbol: string; t: number; o: string; h: string; l: string; c: string; o_depth: string[]; c_depth: string[] }
 interface Position { symbol: string; qty: string; cost_quote_units: string }
 interface Account { cash_quote_units: string; positions: Position[]; equity_quote_units: string }
-interface Batch { type: 'batch'; seq: number; t: number; bars: Bar[]; fills: unknown[]; account: Account }
+interface Fill { client_id: string; status: 'filled' | 'rejected' }
+interface Batch { type: 'batch'; seq: number; t: number; bars: Bar[]; fills: Fill[]; account: Account }
 interface Order { side: 'buy' | 'sell'; client_id: string; symbol: string; notional_quote_units?: string; qty?: string; max_slippage_bps: number }
 
 let firstCloseMs = -1;
@@ -145,6 +148,12 @@ function advance(index: number, close: number): void {
 function onBatch(batch: Batch): Order[] {
   if (firstCloseMs < 0) firstCloseMs = batch.t;
   const index = Math.round((batch.t - firstCloseMs) / MINUTE_MS); // 0 on the first batch
+  // A slice is used up when its order fills, not when it is sent: after a refusal (no bar at the next
+  // open, the slippage limit) the same share is cut again, so a gap never merges slices into one order.
+  // This runs before the machine advances, because a new entry or exit starts a fresh count.
+  for (const fill of batch.fills) {
+    if (fill.status === 'filled' && SLICE_ORDER.test(fill.client_id) && slicesLeft > 1) slicesLeft -= 1;
+  }
   const bar = batch.bars.find((b) => b.symbol === SYMBOL);
   if (bar !== undefined) advance(index, Number(bar.c));
   if (!seenBar) return []; // no bar yet: nothing to price an order against
@@ -175,7 +184,6 @@ function onBatch(batch: Batch): Order[] {
 
   if (want - position >= threshold && cash >= minNotional) {
     let spend = (want - position) / slices;
-    if (slicesLeft > 1) slicesLeft -= 1;
     if (spend < minNotional) spend = minNotional;
     if (spend > cash) spend = cash;
     return [{ side: 'buy', client_id: clientId('b', batch.seq), symbol: SYMBOL, notional_quote_units: spend.toString(), max_slippage_bps: buyLimit }];
@@ -183,7 +191,6 @@ function onBatch(batch: Batch): Order[] {
   // Selling needs a wider gap than buying, so the probe is never sold back on its own.
   if (position - want >= 3n * USDC && qty > 0n) {
     let amount = targetBps === 0n && slicesLeft <= 1 ? qty : (qty * (position - want)) / (position * slices);
-    if (slicesLeft > 1) slicesLeft -= 1;
     if (amount > qty) amount = qty;
     if (amount === 0n) return [];
     return [{ side: 'sell', client_id: clientId('s', batch.seq), symbol: SYMBOL, qty: amount.toString(), max_slippage_bps: MAX_SLIPPAGE_BPS }];

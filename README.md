@@ -21,13 +21,17 @@ The strategy is one round trip, sized at nearly all of the equity:
    shrinking in a straight line to 0.2% at the end. With no target hit, the position is held.
 4. Whatever is still held is sold over the last six decision bars, ahead of the replay's forced
    sale at the last close.
+5. A stop 16% under the entry close, far outside any ordinary day: it exists only to keep a crash
+   inside the 25% drawdown guardrail.
 
 Execution:
 
 - Every decision is taken from the account in the batch (cash, position), so an order the market
   refuses (`no_bar`, `max_slippage`) is sized again on the next batch.
 - Orders are cut into eight slices over consecutive bars: the pool's price impact starts again
-  from its open depth every bar, so N slices pay about 1/N of the impact of one order.
+  from its open depth every bar, so N slices pay about 1/N of the impact of one order. A slice
+  counts as used when it fills, so after a minute with no bar the order is still cut into the
+  same slices instead of catching up in one large piece.
 - No clock, no randomness, no network, no dependencies: two runs give the same bytes.
 
 Why this shape: the ranking pays by place on one unseen 24 hour window, and one-minute bars carry
