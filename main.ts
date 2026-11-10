@@ -156,7 +156,7 @@ function onBatch(batch: Batch): Order[] {
   // A slice is used up when its order fills, not when it is sent: after a refusal (no bar at the next
   // open, the slippage limit) the same share is cut again, so a gap never merges slices into one order.
   // This runs before the machine advances, because a new entry or exit starts a fresh count.
-  for (const fill of batch.fills) {
+  for (const fill of batch.fills ?? []) {
     if (fill.status === 'filled' && SLICE_ORDER.test(fill.client_id) && slicesLeft > 1) slicesLeft -= 1;
   }
   const bar = batch.bars.find((b) => b.symbol === SYMBOL);
