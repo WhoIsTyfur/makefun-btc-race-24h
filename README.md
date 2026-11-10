@@ -17,7 +17,7 @@ The strategy is one round trip, sized at nearly all of the equity:
 1. A 1.73 USDC probe on the first batch, so one order of its own fills on every path.
 2. Entry on the first pullback of 0.2% from the running high of the closes, or by bar 30 if the
    pool has not pulled back by then.
-3. Exit at a take-profit target over the entry close: 0.8% for the first half of the window, then
+3. Exit at a take-profit target over the entry close: 0.65% for the first half of the window, then
    shrinking in a straight line to 0.2% at the end. With no target hit, the position is held.
 4. Whatever is still held is sold over the last six decision bars, ahead of the replay's forced
    sale at the last close.
