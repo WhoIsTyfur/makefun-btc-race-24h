@@ -76,6 +76,7 @@ let reentriesLeft = REENTRIES;
 let dip = DIP;
 let targetBps = BASE_BPS;
 let slicesLeft = ORDER_SLICES;
+let urgentExit = false; // the stop fired: sell without a slippage limit
 let seenBar = false;
 
 function clientId(tag: string, seq: number): string {
@@ -113,6 +114,7 @@ function advance(index: number, close: number): void {
         peak = close;
         targetBps = TARGET_BPS;
         slicesLeft = ORDER_SLICES;
+        urgentExit = false;
         armed = false;
       }
     }
@@ -130,10 +132,13 @@ function advance(index: number, close: number): void {
       if (close >= entry * (1 + target)) leave = true;
     }
     if (TRAIL !== null && peak >= entry * (1 + TRAIL_ARM) && close <= peak * (1 - TRAIL)) leave = true;
-    if (STOP_LOSS !== null && close <= entry * (1 - STOP_LOSS)) leave = true;
-    if (!leave) return;
+    const stopped = STOP_LOSS !== null && close <= entry * (1 - STOP_LOSS);
+    if (!leave && !stopped) return;
     targetBps = BASE_BPS;
-    slicesLeft = ORDER_SLICES;
+    // A take profit leaves in slices. The stop leaves at once, in one order with no price limit:
+    // it only fires in a crash, where eight more bars could cost more than the impact saved.
+    slicesLeft = stopped ? 1 : ORDER_SLICES;
+    urgentExit = stopped;
     if (reentriesLeft > 0) {
       reentriesLeft -= 1;
       mode = 'wait';
@@ -193,7 +198,8 @@ function onBatch(batch: Batch): Order[] {
     let amount = targetBps === 0n && slicesLeft <= 1 ? qty : (qty * (position - want)) / (position * slices);
     if (amount > qty) amount = qty;
     if (amount === 0n) return [];
-    return [{ side: 'sell', client_id: clientId('s', batch.seq), symbol: SYMBOL, qty: amount.toString(), max_slippage_bps: MAX_SLIPPAGE_BPS }];
+    const sellLimit = urgentExit ? FIRST_FILL_SLIPPAGE_BPS : MAX_SLIPPAGE_BPS;
+    return [{ side: 'sell', client_id: clientId('s', batch.seq), symbol: SYMBOL, qty: amount.toString(), max_slippage_bps: sellLimit }];
   }
   // The probe: sent again on every batch until one order of ours has filled.
   if (untouched && PROBE_UNITS >= minNotional) {

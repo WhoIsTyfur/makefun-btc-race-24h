@@ -22,7 +22,7 @@ The strategy is one round trip, sized at nearly all of the equity:
 4. Whatever is still held is sold over the last six decision bars, ahead of the replay's forced
    sale at the last close.
 5. A stop 16% under the entry close, far outside any ordinary day: it exists only to keep a crash
-   inside the 25% drawdown guardrail.
+   inside the 25% drawdown guardrail, and sells in one order with no price limit.
 
 Execution:
 
